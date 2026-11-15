@@ -350,6 +350,10 @@ function drawObstacle(o, a, back, now) {
     ctx.lineWidth = p * 1.2; ctx.strokeStyle = A(0.9);
     line(P(a, ra, h1), P(a, ra, top)); line(P(a, rb, h1), P(a, rb, top));
   }
+  const ga = ctx.globalAlpha;
+  ctx.globalAlpha = 1; ctx.fillStyle = '#000';
+  for (const f of faces) { quad(f[0], f[1], f[2], f[3]); ctx.fill(); }
+  ctx.globalAlpha = ga;
   for (const f of faces) { quad(f[0], f[1], f[2], f[3]); ctx.fillStyle = (low ? O : A)(f[4]); ctx.fill(); }
   if (low && !back && a > 0.12 && (a > 0.9 || Math.floor(now / 90) % 2)) {
     const c = P(a, rp, h1 + R * 0.17), s = p * 3, d = low ? -1 : 1;
@@ -631,6 +635,8 @@ const TRACKS = [
   { name: 'GEOMETRY WARS', file: 'geometry-wars' },
   { name: 'FEEL GOOD INC', file: 'feel-good-inc' },
   { name: 'RUTHERGLEN HEIGHTS', file: 'rutherglen-heights' },
+  { name: 'EAR CANDY', file: 'ear-candy' },
+  { name: 'FAR AWAY', file: 'far-away' },
 ];
 let trackName = '', trackShown = 0;
 const sfx = (() => {
