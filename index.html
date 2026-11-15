@@ -229,6 +229,7 @@ function updateWave(dt) {
 }
 
 function update(dt) {
+  sfx.tick();
   if (state === 'loading' && loadDone && performance.now() > 900) state = 'menu';
   pulse = Math.max(0, pulse - dt * 5);
   runPh += dt * (7 + speed * 2.4);
@@ -356,10 +357,12 @@ function drawObstacle(o, a, back, now) {
   for (const f of faces) { quad(f[0], f[1], f[2], f[3]); ctx.fill(); }
   ctx.globalAlpha = ga;
   for (const f of faces) { quad(f[0], f[1], f[2], f[3]); ctx.fillStyle = (low ? O : A)(f[4]); ctx.fill(); }
-  if (low && !back && a > 0.12 && (a > 0.9 || Math.floor(now / 90) % 2)) {
+  if (!back && a > 0.12 && (a > 0.9 || Math.floor(now / 90) % 2)) {     // cue: up arrow = jump it, down arrow = duck under it
     const c = P(a, rp, h1 + R * 0.17), s = p * 3, d = low ? -1 : 1;
-    ctx.fillStyle = O(1); ctx.beginPath();
-    ctx.moveTo(c[0], c[1] + d * s); ctx.lineTo(c[0] - s, c[1] - d * s * 0.8); ctx.lineTo(c[0] + s, c[1] - d * s * 0.8); ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(c[0], c[1] + d * s); ctx.lineTo(c[0] - s, c[1] - d * s * 0.8); ctx.lineTo(c[0] + s, c[1] - d * s * 0.8); ctx.closePath();
+    ctx.strokeStyle = '#000'; ctx.lineWidth = p * 2.4; ctx.stroke();
+    ctx.fillStyle = (low ? O : A)(1); ctx.fill();
   }
   ctx.restore();
 }
@@ -442,16 +445,21 @@ function depthKey(a, bias) {
 function drawWave() {
   const n = bars.length, mid = Math.round((py - R * 0.8) / p), maxRows = Math.floor(H * 0.3 / p), c0 = Math.round(cx / p);
   const br = 0.3 + 0.22 * waveProg;
-  // once the wave has been full and red for a while, every bar turns rainbow together
-  const rb = state !== 'menu' && t >= 90, tm = performance.now() * 0.001;
+  // from about a minute in, every bar slowly blends from the signal colours into a moving rainbow
+  const rk = state === 'menu' ? 0 : Math.max(0, Math.min(1, (t - 60) / 30)), rb = rk * rk * (3 - 2 * rk), tm = performance.now() * 0.001;
+  const hueRGB = h => { const f = n => { const k = (n + h / 60) % 6; return 255 * (1 - Math.max(0, Math.min(k, 4 - k, 1))); }; return [f(5), f(3), f(1)]; };
+  const heatRGB = h => h < 0.5 ? [30 + 225 * h * 2, 255 - 83 * h * 2, 150 - 150 * h * 2] : [255, 172 - 136 * (h * 2 - 1), 8 * (h * 2 - 1)];
   for (let i = 0; i < n; i++) {
     if (i * 3 * p < Rc + p) continue;            // leave the pillar dark
     const h = Math.max(1, Math.round(bars[i] * maxRows));
     for (let k = 0; k < h; k += 3) {
       const hh = Math.min(3, h - k) * p;
-      ctx.fillStyle = rb
-        ? `hsl(${(((i * 13 + k * 4 - tm * 150) % 360) + 360) % 360},100%,${Math.round(br * 105)}%)`
-        : heatCol(Math.min(1, waveProg * 1.1 + (k / maxRows) * waveProg * 1.4), br);
+      const c1 = heatRGB(Math.min(1, waveProg * 1.1 + (k / maxRows) * waveProg * 1.4));
+      if (rb > 0) {
+        const c2 = hueRGB((((i * 13 + k * 4 - tm * 150) % 360) + 360) % 360);
+        for (let q = 0; q < 3; q++) c1[q] += (c2[q] - c1[q]) * rb;
+      }
+      ctx.fillStyle = `rgb(${c1[0] * br | 0},${c1[1] * br | 0},${c1[2] * br | 0})`;
       const xr = (c0 + i * 3) * p, xl = (c0 - i * 3 - 3) * p;
       ctx.fillRect(xr, (mid - k) * p - hh, 2 * p, hh); ctx.fillRect(xr, (mid + k) * p, 2 * p, hh);
       ctx.fillRect(xl, (mid - k) * p - hh, 2 * p, hh); ctx.fillRect(xl, (mid + k) * p, 2 * p, hh);
@@ -594,6 +602,9 @@ function drawLoader(now) {
     i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
   }
   ctx.stroke();
+  // download progress: a row of bulbs lighting up
+  const nb = 16, lit = Math.round(sfx.progress() * nb), c0 = Math.round(cx / p) - nb, r0 = Math.round((H / 2 + rMax) / p) + 6;
+  for (let i = 0; i < nb; i++) { ctx.fillStyle = G(i < lit ? 1 : 0.16); ctx.fillRect((c0 + i * 2) * p, r0 * p, p, p); }
 }
 
 // hit shockwave: a band of sideways distortion bursts out from the runner, up and down the whole level.
@@ -646,13 +657,55 @@ const TRACKS = [
 let trackName = '', trackShown = 0;
 const sfx = (() => {
   let AC = null, out = null, an = null, fb = null, mixN = null, sfxBus = null, acc = 0, step = 0;
-  let play = null, loaded = null, token = 0, queued = -1, noTracks = false, pending = 0, fails = 0, rebuilt = 0, unlocked = false, watch = 0;
+  let play = null, token = 0, queued = -1, noTracks = false, starting = false, fails = 0, rebuilt = 0, unlocked = false, watch = 0, fetched = 0;
   const bass = [55, 55, 65.41, 55, 49, 49, 73.42, 65.41];
+  const HIT_VOL = 2;        // the hit mixes are quieter files, so they play boosted
+  const NT = TRACKS.length, wait = ms => new Promise(res => setTimeout(res, ms));
+
+  // Every song file is downloaded up front, behind the loading screen, and kept in its compressed form (small).
+  // Unpacked audio is huge, so only two songs are unpacked at any time: the one playing and the next one in line.
+  const grab = url => fetch(url).then(r => { if (!r.ok) throw new Error('missing ' + url); return r.arrayBuffer(); });
+  const files = TRACKS.map(T => {
+    const get = url => grab(url).catch(() => wait(1200).then(() => grab(url)));
+    const F = { m: get(T.file + '.mp3'), h: get(T.file + '-hit.mp3') };
+    for (const k of ['m', 'h']) F[k].then(() => { fetched++; }, () => { fetched++; });
+    return F;
+  });
+  const allFetched = Promise.all(files.flatMap(F => [F.m.catch(() => {}), F.h.catch(() => {})]));
+  const decoded = new Map();          // track index -> { m, h } promises of unpacked audio
+
+  function decodeWith(ctx, ab) {
+    return new Promise((res, rej) => {
+      try { const pr = ctx.decodeAudioData(ab.slice(0), res, rej); if (pr && pr.catch) pr.catch(rej); } catch (e) { rej(e); }
+    });
+  }
+  function unpack(file, small) {
+    return file.then(ab => {
+      if (!AC) throw new Error('no audio');
+      if (small) {            // the hit mixes are 22 kHz mono files: unpack them at that size instead of blowing them up
+        try {
+          const OC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+          return decodeWith(new OC(1, 1, 22050), ab).catch(() => decodeWith(AC, ab));
+        } catch (e) {}
+      }
+      return decodeWith(AC, ab);
+    });
+  }
+  function decodeTrack(i) {
+    if (decoded.has(i)) return decoded.get(i);
+    const D = { m: unpack(files[i].m, false), h: unpack(files[i].h, true) };
+    D.m.catch(() => { if (decoded.get(i) === D) decoded.delete(i); });
+    D.h.catch(() => {});
+    decoded.set(i, D);
+    return D;
+  }
+  function keepOnly(a, b) { for (const k of [...decoded.keys()]) if (k !== a && k !== b) decoded.delete(k); }
+
   function init() {
-    if (AC && AC.state === 'closed') { AC = null; play = null; loaded = null; }
+    if (AC && AC.state === 'closed') { AC = null; play = null; }
     if (AC) { wake(); return; }
     try {
-      const C = window.AudioContext || window.webkitAudioContext; if (!C) return;
+      const C = window.AudioContext || window.webkitAudioContext; if (!C) { loadDone = true; return; }
       AC = new C();
       // everything -> mix -> analyser -> mute gain -> speakers (so the sound wave still moves when muted)
       out = AC.createGain(); out.gain.value = muted ? 0 : 1; out.connect(AC.destination);
@@ -660,9 +713,11 @@ const sfx = (() => {
       an.connect(out);
       mixN = AC.createGain(); mixN.connect(an);
       sfxBus = AC.createGain(); sfxBus.gain.value = 0.5; sfxBus.connect(mixN);
-      if (queued < 0) queued = Math.floor(Math.random() * TRACKS.length);
-      loadTrack(queued).m.then(() => { loadDone = true; }, () => { loadDone = true; });
-    } catch (e) { AC = null; an = null; }
+      if (queued < 0) queued = Math.floor(Math.random() * NT);
+      // loading screen ends when every file is down and the first song is unpacked
+      const first = queued;
+      allFetched.then(() => decodeTrack(first).m).then(() => { loadDone = true; }, () => { noTracks = true; loadDone = true; });
+    } catch (e) { AC = null; an = null; loadDone = true; }
   }
   // phones suspend or interrupt audio (calls, app switches, silence); bring it back whenever we can
   function wake() {
@@ -681,39 +736,17 @@ const sfx = (() => {
       if (AC !== ctx0 || AC.state === 'running' || rebuilt >= 2) return;
       rebuilt++;
       try { ctx0.close(); } catch (e) {}
-      AC = null; play = null; loaded = null; unlocked = false; token++;
+      AC = null; play = null; decoded.clear(); unlocked = false; starting = false; token++;
       init();
       if (state === 'play' || state === 'over') startMusic(queued < 0 ? 0 : queued, state !== 'play');
     }, 900);
   }
-  function loadBuf(url) {
-    return fetch(url).then(r => { if (!r.ok) throw new Error('missing ' + url); return r.arrayBuffer(); })
-      .then(ab => new Promise((res, rej) => AC.decodeAudioData(ab, res, rej)));
-  }
-  // each track is a main mix plus a "hit" mix; only one track is kept decoded at a time (they are big).
-  // The two files load side by side, each with one automatic retry, and each can start playing as soon as it is ready.
-  function loadTrack(i) {
-    if (loaded && loaded.i === i) return loaded;
-    const f = TRACKS[i].file, wait = ms => new Promise(res => setTimeout(res, ms));
-    const get = url => loadBuf(url).catch(() => wait(1200).then(() => loadBuf(url)));
-    const L = { i, m: get(f + '.mp3'), h: get(f + '-hit.mp3') };
-    pending++;
-    L.m.then(() => { noTracks = false; fails = 0; }, () => { fails++; noTracks = true; if (loaded === L) loaded = null; });
-    L.h.catch(() => {});
-    const done = () => { pending--; };
-    Promise.all([L.m.catch(() => {}), L.h.catch(() => {})]).then(done, done);
-    loaded = L;
-    return L;
-  }
-  function stopMusic(fade) {
-    token++;
-    if (!play || !AC) return;
-    const P = play, n = AC.currentTime; play = null;
+  function stopPlay(P, fade) {
+    const n = AC.currentTime;
     try { P.bus.gain.cancelScheduledValues(n); P.bus.gain.setValueAtTime(P.bus.gain.value, n); P.bus.gain.linearRampToValueAtTime(0, n + fade); } catch (e) {}
     for (const src of [P.sm, P.sh]) if (src) { try { src.stop(n + fade + 0.05); } catch (e) {} }
     setTimeout(() => { try { P.bus.disconnect(); } catch (e) {} }, (fade + 0.3) * 1000);
   }
-  const HIT_VOL = 2;        // the hit mixes are quieter files, so they play boosted
   // which = 'main' or 'hit'; moves the playing track to that mix over `over` seconds
   function setMix(which, over) {
     if (!play || !AC) return;
@@ -723,32 +756,41 @@ const sfx = (() => {
       gh.gain.cancelScheduledValues(n); gh.gain.setValueAtTime(gh.gain.value, n); gh.gain.linearRampToValueAtTime(hitOn ? HIT_VOL : 0, n + over);
     } catch (e) {}
   }
+  // Switch to track i. Whatever is playing keeps playing until the new song is ready, so a skip is never silent.
   function startMusic(i, hitMix) {
     if (!AC) return;
-    stopMusic(0.2);
-    const my = token; queued = i;
+    const my = ++token; queued = i; starting = true;
     trackName = TRACKS[i].name; trackShown = performance.now();
-    const swap = loaded && loaded.i !== i;
-    if (swap) loaded = null;                         // let go of the old track's audio before decoding the new one
-    setTimeout(() => {
+    keepOnly(i, play ? play.i : i);
+    const D = decodeTrack(i), len = TRACKS[i].len;
+    let P = null;
+    const add = (buf, key) => {
+      const src = AC.createBufferSource(), when = AC.currentTime + 0.06;
+      src.buffer = buf; src.loop = true; src.loopEnd = Math.min(len, buf.duration); src.connect(key === 'sm' ? P.gm : P.gh);
+      if (P.t0 < 0) { P.t0 = when; src.start(when); }
+      else src.start(when, (when - P.t0) % src.loopEnd);       // drop in at the same point of the song as the other mix
+      P[key] = src;
+    };
+    const need = hitMix ? D.h : D.m, other = hitMix ? D.m : D.h;
+    need.then(buf => {
       if (my !== token || !AC) return;
-      const L = loadTrack(i), len = TRACKS[i].len;
+      if (play) stopPlay(play, 0.2);
       const bus = AC.createGain(), gm = AC.createGain(), gh = AC.createGain();
       bus.gain.value = 0.85; gm.gain.value = hitMix ? 0 : 1; gh.gain.value = hitMix ? HIT_VOL : 0;
       bus.connect(mixN); gm.connect(bus); gh.connect(bus);
-      const P = { bus, gm, gh, sm: null, sh: null, t0: -1 };
-      play = P;                                      // the track is "on" from now; each mix joins as it finishes loading
-      const join = (buf, g, key) => {
-        if (my !== token || play !== P) return;
-        const src = AC.createBufferSource(), when = AC.currentTime + 0.06;
-        src.buffer = buf; src.loop = true; src.loopEnd = Math.min(len, buf.duration); src.connect(g);
-        if (P.t0 < 0) { P.t0 = when; src.start(when); }
-        else src.start(when, (when - P.t0) % src.loopEnd);     // drop in at the same point of the song as the other mix
-        P[key] = src;
-      };
-      L.m.then(b => join(b, gm, 'sm'), () => { if (my === token && play === P && !P.sh) { play = null; } });
-      L.h.then(b => join(b, gh, 'sh'), () => {});
-    }, swap ? 250 : 0);
+      P = { i, bus, gm, gh, sm: null, sh: null, t0: -1 };
+      play = P; starting = false; fails = 0; noTracks = false;
+      add(buf, hitMix ? 'sh' : 'sm');
+      other.then(b2 => { if (my === token && play === P) add(b2, hitMix ? 'sm' : 'sh'); }, () => {});
+      // line up the next song in the cycle so the next skip is instant
+      const nx = (i + 1) % NT;
+      keepOnly(i, nx);
+      setTimeout(() => { if (my === token && AC) decodeTrack(nx); }, 1500);
+    }, () => {
+      if (my !== token) return;
+      starting = false; fails++;
+      if (!play) noTracks = true;
+    });
   }
   function tone(f0, f1, dur, type, vol) {
     if (!AC || muted) return;
@@ -763,30 +805,38 @@ const sfx = (() => {
   }
   return {
     init, wake, unlock,
-    debug() { return { ac: AC && AC.state, track: queued, on: !!play, main: !!(play && play.sm), hit: !!(play && play.sh), gm: play && play.gm.gain.value, gh: play && play.gh.gain.value, pending, fails, noTracks, muted }; },
+    progress() { return fetched / (NT * 2); },
+    // called every frame: when the current song reaches its end, move on to the next one in the list
+    tick() {
+      if (!AC || !play || starting || play.t0 < 0 || fails >= 6) return;
+      if (AC.currentTime - play.t0 >= TRACKS[play.i].len - 0.25) startMusic((play.i + 1) % NT, state !== 'play');
+    },
+    debug() { return { ac: AC && AC.state, track: queued, playing: play ? play.i : -1, main: !!(play && play.sm), hit: !!(play && play.sh), gm: play && play.gm.gain.value, gh: play && play.gh.gain.value, starting, fails, noTracks, muted, fetched, unpacked: [...decoded.keys()] }; },
     // called every frame of a round: if no song is playing and none is on its way, try again
     watchdog(dt) {
-      if (!AC || play || pending > 0) { watch = 0; return; }
+      if (!AC || play || starting) { watch = 0; return; }
       watch += dt;
-      if (watch > 2.5 && fails < 6) { watch = 0; startMusic(queued < 0 ? Math.floor(Math.random() * TRACKS.length) : queued); }
+      if (watch > 2.5 && fails < 6) { watch = 0; startMusic(queued < 0 ? Math.floor(Math.random() * NT) : queued); }
     },
     spectrum() { if (!AC || !an || AC.state !== 'running') return null; an.getByteFrequencyData(fb); return fb; },
     toggle() { muted = !muted; if (out) out.gain.value = muted ? 0 : 1; },
-    // a new round: the first one starts a random track
+    // a new round: the same song carries on (back on its main mix); the very first round starts the random pick
     start() {
       acc = 0; step = 0;
       if (!AC) return;
-      if (play) { setMix('main', 0.6); return; }      // same track carries on; bring the main mix back
-      if (queued < 0) queued = Math.floor(Math.random() * TRACKS.length);
-      startMusic(queued);
+      if (starting) { startMusic(queued, false); return; }
+      if (play) { setMix('main', 0.6); return; }
+      if (queued < 0) queued = Math.floor(Math.random() * NT);
+      startMusic(queued, false);
     },
     // round over: stay on the hit mix until the next game starts
     gameOver() { setMix('hit', 0.05); },
+    // next song in the list, wrapping round
     skip() {
       if (!AC) return;
-      const next = ((queued < 0 ? 0 : queued) + 1) % TRACKS.length;
-      if (state === 'play' || play) startMusic(next, state !== 'play');   // between games the new track comes in on its hit mix
-      else { queued = next; loaded = null; loadTrack(next); trackName = TRACKS[next].name; trackShown = performance.now(); }
+      const next = ((queued < 0 ? 0 : queued) + 1) % NT;
+      if (state === 'play' || play || starting) startMusic(next, state !== 'play');   // between games the new song comes in on its hit mix
+      else { queued = next; keepOnly(next, next); decodeTrack(next); trackName = TRACKS[next].name; trackShown = performance.now(); }
     },
     jump() { tone(330, 720, 0.14, 'square', 0.08); },
     duck() { tone(300, 140, 0.1, 'square', 0.07); },
@@ -859,7 +909,7 @@ window.addEventListener('focus', () => sfx.wake());
 window.__walkCycle = { sfx };   // for troubleshooting from the browser console
 sfx.init();     // start decoding the first track behind the loading screen
 
-setTimeout(() => { loadDone = true; }, 15000);     // never wait forever
+setTimeout(() => { loadDone = true; }, 60000);     // never wait forever
 
 // ---------- loop ----------
 let last = 0;
